@@ -45,8 +45,31 @@ enum DatabaseLocation {
     private static func open(path: String, flags: Int32) throws -> RawSqliteConnection {
         var db: OpaquePointer?
         let rc = sqlite3_open_v2(path, &db, flags, nil)
-        if rc != 0 {
-            throw PowerSyncError.sqliteError(extendedResultCode: rc, offset: nil, message: "Could not open database \(path)", errorString: nil, sql: nil)
+        if rc != SQLITE_OK {
+            // On failure SQLite still hands back a connection that holds the reason: the
+            // extended code, its message, and the operating-system errno for a CANTOPEN or
+            // IOERR. Read them before closing it. The close is required whether or not the
+            // open succeeded; without it the half-opened handle leaks. With no handle at all
+            // (out of memory) the only text is the generic description of the result code.
+            let extended = db.map { sqlite3_extended_errcode($0) } ?? rc
+            let reason = db.flatMap { sqlite3_errmsg($0) }.map { String(cString: $0) }
+                ?? String(cString: sqlite3_errstr(rc))
+            let systemErrno = db.map { sqlite3_system_errno($0) } ?? 0
+            if let db {
+                sqlite3_close(db)
+            }
+            var detail = "Could not open database \(path) (flags \(flags)"
+            if systemErrno != 0 {
+                detail += ", errno \(systemErrno)"
+            }
+            detail += ")"
+            throw PowerSyncError.sqliteError(
+                extendedResultCode: extended,
+                offset: nil,
+                message: detail,
+                errorString: reason,
+                sql: nil
+            )
         }
         return RawSqliteConnection(connection: db!)
     }
